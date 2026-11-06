@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite3
+.agents/
+.pytest_cache/
+venv/
+.venv/
+env/
+
+# Batch orchestrator output (regenerated per run).
+sample_data/**/_batch_out/
+.uploads/

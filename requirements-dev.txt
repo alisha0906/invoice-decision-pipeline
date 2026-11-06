@@ -1,0 +1,11 @@
+# Test/dev-only dependencies. NOT required at runtime — the app never imports
+# these. Install with:  python -m pip install -r requirements-dev.txt
+#
+# pytest-forked runs each test in its own subprocess so a native (C-level)
+# crash in one test can't take down the whole session. It is only useful as a
+# workaround for the known Windows+OneDrive PyMuPDF+Starlette native crash when
+# running the full suite in one process. NOTE: pytest-forked relies on
+# os.fork(), which does NOT exist on Windows, so --forked cannot run there — on
+# Windows run tests/test_scenarios.py alone and the rest alone instead (see
+# README "Running the tests"). It works on Linux/macOS.
+pytest-forked==1.6.0
