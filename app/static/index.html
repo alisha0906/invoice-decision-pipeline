@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Invoice Decision Pipeline</title>
+  <!-- Tailwind via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Alpine.js via CDN (defer so x-data is ready on load) -->
+  <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="/styles.css" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: "#0f172a",
+            panel: "#111827",
+          },
+        },
+      },
+    };
+  </script>
+</head>
+<body class="h-full bg-slate-950 text-slate-100 antialiased" x-data="pipelineApp()" x-init="init()">
+  <div class="mx-auto max-w-6xl px-4 py-6">
+    <!-- Header -->
+    <header class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h1 class="text-2xl font-semibold tracking-tight">Invoice Decision Pipeline</h1>
+        <p class="text-sm text-slate-400">Extract &rarr; Structure &rarr; Match PO &rarr; Decide. Runs fully offline.</p>
+      </div>
+      <!-- View tabs -->
+      <nav class="inline-flex rounded-lg bg-slate-900 p-1 text-sm font-medium ring-1 ring-slate-800">
+        <button
+          @click="view = 'live'"
+          :class="view === 'live' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
+          class="rounded-md px-4 py-1.5 transition">
+          Live Run
+        </button>
+        <button
+          @click="view = 'dashboard'; loadRuns()"
+          :class="view === 'dashboard' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
+          class="rounded-md px-4 py-1.5 transition">
+          Dashboard
+        </button>
+      </nav>
+    </header>
+
+    <!-- ===================== LIVE RUN VIEW ===================== -->
+    <section x-show="view === 'live'" class="space-y-6">
+      <!-- Controls -->
+      <div class="rounded-xl bg-slate-900 p-5 ring-1 ring-slate-800">
+        <div class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+          <div class="space-y-2">
+            <label class="block text-sm font-medium text-slate-300">Upload an invoice PDF</label>
+            <input
+              type="file"
+              accept="application/pdf"
+              @change="onFileChange($event)"
+              :disabled="running"
+              class="block w-full text-sm text-slate-400 file:mr-4 file:rounded-md file:border-0 file:bg-indigo-600 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-indigo-500 disabled:opacity-50" />
+          </div>
+          <div class="space-y-2">
+            <label class="block text-sm font-medium text-slate-300">...or pick a bundled sample</label>
+            <div class="flex items-center gap-2">
+              <select
+                x-model="selectedSample"
+                :disabled="running || samples.length === 0"
+                class="rounded-md border-0 bg-slate-800 px-3 py-2 text-sm text-slate-100 ring-1 ring-slate-700 focus:ring-2 focus:ring-indigo-500 disabled:opacity-50">
+                <option value="" disabled>
+                  <span x-text="samples.length ? 'Choose a sample' : 'No samples bundled'"></span>
+                </option>
+                <template x-if="syntheticSamples().length">
+                  <optgroup label="Synthetic scenarios">
+                    <template x-for="s in syntheticSamples()" :key="s.name">
+                      <option :value="s.name" x-text="s.label"></option>
+                    </template>
+                  </optgroup>
+                </template>
+                <template x-if="realSamples().length">
+                  <optgroup label="Real / HuggingFace">
+                    <template x-for="s in realSamples()" :key="s.name">
+                      <option :value="s.name" x-text="s.label"></option>
+                    </template>
+                  </optgroup>
+                </template>
+              </select>
+              <button
+                @click="runSample()"
+                :disabled="running || !selectedSample"
+                class="rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50">
+                Run sample
+              </button>
+            </div>
+          </div>
+        </div>
+        <p x-show="error" x-text="error" class="mt-3 text-sm text-rose-400"></p>
+      </div>
+
+      <!-- Final decision banner -->
+      <div
+        x-show="decision"
+        x-transition
+        :class="bannerClass(decision)"
+        class="rounded-xl p-5 ring-1">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-xs uppercase tracking-widest opacity-80">Final decision</p>
+            <p class="text-3xl font-bold" x-text="decision"></p>
+          </div>
+          <span class="text-sm opacity-80" x-text="currentFilename"></span>
+        </div>
+      </div>
+
+      <!-- Pipeline stages -->
+      <div class="grid gap-4 md:grid-cols-2">
+        <div class="space-y-3">
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-400">Pipeline stages</h2>
+          <template x-for="st in orderedStages()" :key="st.name">
+            <div class="stage-card rounded-xl bg-slate-900 p-4 ring-1 ring-slate-800"
+                 :class="st.state === 'done' ? 'opacity-100' : (st.state === 'active' ? 'ring-indigo-500' : 'opacity-50')">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                  <span class="flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold"
+                        :class="stageDotClass(st)">
+                    <span x-show="st.state === 'done'">&check;</span>
+                    <span x-show="st.state === 'active'" class="animate-pulse">&bull;</span>
+                    <span x-show="st.state === 'pending'" x-text="st.index"></span>
+                  </span>
+                  <span class="font-medium" x-text="st.label"></span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span x-show="st.name === 'extract' && st.data && st.data.reader"
+                        class="status-badge badge-neutral"
+                        x-text="'reader: ' + (st.data ? st.data.reader : '')"></span>
+                  <span x-show="st.status" class="status-badge" :class="statusBadgeClass(st.status)" x-text="st.status"></span>
+                  <span x-show="st.confidence !== null" class="text-xs text-slate-400"
+                        x-text="st.confidence !== null ? ('conf ' + st.confidence) : ''"></span>
+                </div>
+              </div>
+              <p x-show="st.message" class="mt-2 text-sm text-slate-200" x-text="st.message"></p>
+              <pre x-show="st.data" class="mt-3 max-h-48 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-300"
+                   x-text="st.data ? JSON.stringify(st.data, null, 2) : ''"></pre>
+            </div>
+          </template>
+        </div>
+
+        <!-- Reasoning trail -->
+        <div class="space-y-3">
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-400">Reasoning trail</h2>
+          <div class="rounded-xl bg-slate-900 p-4 ring-1 ring-slate-800">
+            <p x-show="reasoningTrail.length === 0" class="text-sm text-slate-500">
+              Run an invoice to see the ordered checks here.
+            </p>
+            <ul class="space-y-2">
+              <template x-for="(item, idx) in reasoningTrail" :key="idx">
+                <li class="rounded-lg bg-slate-950 p-3 ring-1 ring-slate-800">
+                  <div class="flex items-center justify-between">
+                    <span class="font-medium" x-text="item.check"></span>
+                    <span class="status-badge" :class="item.passed ? 'badge-approve' : 'badge-reject'"
+                          x-text="item.passed ? 'PASS' : 'FAIL'"></span>
+                  </div>
+                  <pre class="mt-2 overflow-auto text-xs text-slate-400" x-text="JSON.stringify(item.observed, null, 2)"></pre>
+                </li>
+              </template>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== DASHBOARD VIEW ===================== -->
+    <section x-show="view === 'dashboard'" class="space-y-4">
+      <div class="flex items-center justify-between">
+        <h2 class="text-lg font-semibold">Run history</h2>
+        <div class="flex items-center gap-2">
+          <label class="text-sm text-slate-400">Filter</label>
+          <select x-model="filter" @change="loadRuns()"
+                  class="rounded-md border-0 bg-slate-800 px-3 py-2 text-sm text-slate-100 ring-1 ring-slate-700 focus:ring-2 focus:ring-indigo-500">
+            <option value="">All</option>
+            <option value="APPROVE">Approve</option>
+            <option value="REVIEW">Review</option>
+            <option value="REJECT">Reject</option>
+          </select>
+          <button @click="loadRuns()" class="rounded-md bg-slate-800 px-3 py-2 text-sm text-slate-200 ring-1 ring-slate-700 hover:bg-slate-700">
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      <div class="overflow-hidden rounded-xl ring-1 ring-slate-800">
+        <table class="min-w-full divide-y divide-slate-800 text-sm">
+          <thead class="bg-slate-900 text-left text-xs uppercase tracking-wide text-slate-400">
+            <tr>
+              <th class="px-4 py-3">ID</th>
+              <th class="px-4 py-3">When</th>
+              <th class="px-4 py-3">File</th>
+              <th class="px-4 py-3">Vendor</th>
+              <th class="px-4 py-3">Invoice #</th>
+              <th class="px-4 py-3">Total</th>
+              <th class="px-4 py-3">Decision</th>
+              <th class="px-4 py-3"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-800 bg-slate-950">
+            <template x-for="r in runs" :key="r.id">
+              <tr class="hover:bg-slate-900/60">
+                <td class="px-4 py-3 text-slate-400" x-text="r.id"></td>
+                <td class="px-4 py-3 text-slate-400" x-text="(r.timestamp || '').slice(0,19).replace('T',' ')"></td>
+                <td class="px-4 py-3" x-text="r.input_filename"></td>
+                <td class="px-4 py-3" x-text="r.vendor || '-'"></td>
+                <td class="px-4 py-3" x-text="r.invoice_number || '-'"></td>
+                <td class="px-4 py-3" x-text="r.total ?? '-'"></td>
+                <td class="px-4 py-3">
+                  <span class="status-badge" :class="badgeClass(r.decision)" x-text="r.decision"></span>
+                </td>
+                <td class="px-4 py-3 text-right">
+                  <button @click="openDetail(r.id)" class="text-indigo-400 hover:text-indigo-300">Details</button>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="runs.length === 0">
+              <td colspan="8" class="px-4 py-6 text-center text-slate-500">No runs yet.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Detail modal -->
+    <div x-show="detail" x-transition class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" style="display:none;">
+      <div class="max-h-[85vh] w-full max-w-2xl overflow-auto rounded-xl bg-slate-900 p-6 ring-1 ring-slate-700" @click.outside="detail = null">
+        <template x-if="detail">
+          <div class="space-y-4">
+            <div class="flex items-center justify-between">
+              <h3 class="text-lg font-semibold">
+                Run #<span x-text="detail.id"></span>
+                <span class="ml-2 status-badge" :class="badgeClass(detail.decision)" x-text="detail.decision"></span>
+              </h3>
+              <button @click="detail = null" class="text-slate-400 hover:text-slate-200">&times;</button>
+            </div>
+            <div>
+              <h4 class="mb-1 text-xs uppercase tracking-wide text-slate-400">Extracted fields</h4>
+              <pre class="overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-300" x-text="JSON.stringify(detail.extracted_fields, null, 2)"></pre>
+            </div>
+            <div>
+              <h4 class="mb-1 text-xs uppercase tracking-wide text-slate-400">Matched PO</h4>
+              <pre class="overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-300" x-text="JSON.stringify(detail.matched_po, null, 2)"></pre>
+            </div>
+            <div>
+              <h4 class="mb-1 text-xs uppercase tracking-wide text-slate-400">Reasoning trail</h4>
+              <ul class="space-y-2">
+                <template x-for="(item, idx) in detail.reasoning_trail" :key="idx">
+                  <li class="rounded-lg bg-slate-950 p-3 ring-1 ring-slate-800">
+                    <div class="flex items-center justify-between">
+                      <span class="font-medium" x-text="item.check"></span>
+                      <span class="status-badge" :class="item.passed ? 'badge-approve' : 'badge-reject'" x-text="item.passed ? 'PASS' : 'FAIL'"></span>
+                    </div>
+                    <pre class="mt-2 overflow-auto text-xs text-slate-400" x-text="JSON.stringify(item.observed, null, 2)"></pre>
+                  </li>
+                </template>
+              </ul>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
